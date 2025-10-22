@@ -18,9 +18,7 @@ from datetime import datetime, timezone
 
 def _setup_logging() -> None:
     """Configure logging based on DEBUG environment variable."""
-    debug = os.environ.get("DEBUG", "").lower() == "true"
-    level = logging.DEBUG if debug else logging.ERROR
-    logging.basicConfig(level=level, format="[%(levelname)s] %(message)s")
+    logging.basicConfig(level="DEBUG", format="[%(levelname)s] %(message)s")
     logging.debug("Debug logging is enabled.")
 
 
