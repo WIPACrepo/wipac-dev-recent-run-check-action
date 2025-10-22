@@ -4,7 +4,7 @@ It outputs a single boolean called `ran_recently`.
 
 ---
 
-## 💡 How It Works 
+## 💡 How It Works
 
 | Case | Output: `ran_recently` |
 |------|--------------------------|
