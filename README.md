@@ -70,3 +70,63 @@ jobs:
           echo "Proceeding with build..."
           make all
 ```
+
+## 🔒 Pre-job gating (skip whole jobs based on recent workflow activity)
+
+You can run this action once as a **pre-job** and gate entire jobs using a job-level `if:` that reads the pre-job’s output.
+
+> **Tip:** This pattern works best with `scope: workflow`, since a pre-job can’t auto-detect downstream job identities.
+
+### Example: gate multiple jobs with a single pre-check
+
+```yaml
+name: CI
+
+on:
+  push:
+    branches: ["**"]
+
+jobs:
+  recent-check:
+    name: recent-check (workflow scope)
+    runs-on: ubuntu-latest
+    outputs:
+      ran_recently: ${{ steps.recent.outputs.ran_recently }}
+    steps:
+      - id: recent
+        uses: your-org/recent-run-check@v1
+        with:
+          scope: workflow          # <- gate by last workflow run on this branch
+          window-seconds: 900
+          always-false-on-default-branch: true
+
+      # Optional: show the summary and the machine-readable output too
+      - name: echo result
+        run: echo "ran_recently=${{ steps.recent.outputs.ran_recently }}"
+
+  build:
+    name: build
+    needs: recent-check
+    if: ${{ needs.recent-check.outputs.ran_recently != 'true' }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: echo "Doing the build..."
+
+  test:
+    # always run these!
+    name: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: echo "Running tests..."
+
+  recent-note:
+    name: recent-note
+    needs: recent-check
+    if: ${{ needs.recent-check.outputs.ran_recently == 'true' }}
+    runs-on: ubuntu-latest
+    steps:
+      - run: |
+          echo "⏳ Workflow ran recently on this branch; heavy jobs skipped."
+```
