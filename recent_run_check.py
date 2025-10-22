@@ -11,6 +11,7 @@ import json
 import urllib.request
 import logging
 from datetime import datetime, timezone
+from typing import Dict, Optional, Tuple
 
 
 # ────────────────────────── Logging Setup ──────────────────────────
@@ -20,11 +21,20 @@ def _setup_logging() -> None:
     """Configure logging with level set by LOG_LEVEL (DEBUG/INFO/WARNING/ERROR)."""
     level_name = os.environ.get("LOG_LEVEL", "INFO").upper()
     level = getattr(logging, level_name, logging.INFO)
-    logging.basicConfig(
-        level=level,
-        format="[%({levelname})s] %(message)s".format(levelname="levelname"),
-    )
+    logging.basicConfig(level=level, format="[%(levelname)s] %(message)s")
     logging.debug(f"Logging initialized at level={level_name}")
+
+
+def _begin_group(title: str) -> None:
+    """Start a GitHub Actions log group if LOG_GROUPING=true."""
+    if os.environ.get("LOG_GROUPING", "true").lower() == "true":
+        print(f"::group::{title}")
+
+
+def _end_group() -> None:
+    """End a GitHub Actions log group if LOG_GROUPING=true."""
+    if os.environ.get("LOG_GROUPING", "true").lower() == "true":
+        print("::endgroup::")
 
 
 # ────────────────────────── Utilities ──────────────────────────
@@ -63,6 +73,20 @@ def calculate_age_seconds(ts: str) -> float:
     return age
 
 
+def humanize_seconds(s: Optional[float]) -> str:
+    """Return a short human string for seconds like '8m 12s' or '—' if None."""
+    if s is None:
+        return "—"
+    s = int(max(0, s))
+    m, sec = divmod(s, 60)
+    h, m = divmod(m, 60)
+    if h:
+        return f"{h}h {m}m {sec}s"
+    if m:
+        return f"{m}m {sec}s"
+    return f"{sec}s"
+
+
 def get_workflow_file() -> str:
     """Extract the workflow filename from GITHUB_WORKFLOW_REF."""
     ref = os.environ["GITHUB_WORKFLOW_REF"]
@@ -71,7 +95,7 @@ def get_workflow_file() -> str:
     return wf_file
 
 
-def get_owner_repo() -> tuple[str, str]:
+def get_owner_repo() -> Tuple[str, str]:
     """Return (owner, repo) parsed from GITHUB_REPOSITORY."""
     owner, repo = tuple(os.environ["GITHUB_REPOSITORY"].split("/", 1))
     logging.debug(f"Repo parsed as owner={owner}, repo={repo}")
@@ -81,7 +105,7 @@ def get_owner_repo() -> tuple[str, str]:
 # ───────────────────── Workflow-level logic ─────────────────────
 
 
-def get_latest_prior_different_commit_run() -> dict | None:
+def get_latest_prior_different_commit_run() -> Optional[dict]:
     """Return the most recent prior workflow run on this branch that used a different commit SHA."""
     owner, repo = get_owner_repo()
     wf = get_workflow_file()
@@ -109,41 +133,48 @@ def get_latest_prior_different_commit_run() -> dict | None:
     return None
 
 
-def workflow_ran_recently(window_seconds: int) -> bool:
-    """Return True if a different-commit workflow run occurred on this branch within the time window."""
+def workflow_decision(window_seconds: int) -> Tuple[bool, Dict[str, str]]:
+    """Return (result, details) for workflow scope decision."""
+    details: Dict[str, str] = {}
     prior = get_latest_prior_different_commit_run()
     if not prior:
-        logging.info(
-            "Result (workflow scope): ran_recently=false (no prior different-commit run)."
-        )
-        return False
+        details["reason"] = "No prior different-commit workflow run on this branch."
+        details["age_seconds"] = "—"
+        details["prior_run_id"] = "—"
+        details["prior_timestamp"] = "—"
+        return False, details
 
     ts = prior.get("run_started_at") or prior.get("created_at")
     if not ts:
-        logging.warning(
-            "Prior run exists but has no timestamp; treating as not recent."
-        )
-        return False
+        details["reason"] = "Prior run had no usable timestamp."
+        details["age_seconds"] = "—"
+        details["prior_run_id"] = str(prior.get("id"))
+        details["prior_timestamp"] = "—"
+        return False, details
 
     age = calculate_age_seconds(ts)
     recent = age < window_seconds
-    logging.info(
-        f"Result (workflow scope): ran_recently={'true' if recent else 'false'} "
-        f"(age={age:.0f}s, window={window_seconds}s, ts={ts})."
+    details["reason"] = (
+        "Recent prior workflow run detected."
+        if recent
+        else "Prior workflow run is outside the window."
     )
-    return recent
+    details["age_seconds"] = f"{int(age)}"
+    details["prior_run_id"] = str(prior.get("id"))
+    details["prior_timestamp"] = ts
+    return recent, details
 
 
 # ────────────────────── Job-level logic ──────────────────────
 
 
-def get_latest_prior_different_commit_run_id() -> str | None:
+def get_latest_prior_different_commit_run_id() -> Optional[str]:
     """Return the run ID of the latest prior different-commit workflow run, or None if none."""
     prior = get_latest_prior_different_commit_run()
     return str(prior["id"]) if prior else None
 
 
-def get_job_timestamp_in_run(run_id: str, job_name: str) -> str | None:
+def get_job_timestamp_in_run(run_id: str, job_name: str) -> Optional[str]:
     """Return the job timestamp (start or created_at) for a given job name in a given run ID."""
     owner, repo = get_owner_repo()
     url = (
@@ -159,37 +190,82 @@ def get_job_timestamp_in_run(run_id: str, job_name: str) -> str | None:
             )
             return ts
 
-    # If the job has a custom `name:` in YAML and differs from github.job, this may miss; that's intentional for auto-detect.
-    logging.warning(
-        f"Job name='{job_name}' not found in prior run_id={run_id}; treating as not recent."
-    )
+    logging.warning(f"Job name='{job_name}' not found in prior run_id={run_id}.")
     return None
 
 
-def job_ran_recently(window_seconds: int) -> bool:
-    """Return True if this same job ran in a different-commit workflow run within the time window."""
+def job_decision(window_seconds: int) -> Tuple[bool, Dict[str, str]]:
+    """Return (result, details) for job scope decision."""
+    details: Dict[str, str] = {}
     last_run_id = get_latest_prior_different_commit_run_id()
     if not last_run_id:
-        logging.info(
-            "Result (job scope): ran_recently=false (no prior different-commit run)."
-        )
-        return False
+        details["reason"] = "No prior different-commit workflow run on this branch."
+        details["age_seconds"] = "—"
+        details["prior_run_id"] = "—"
+        details["prior_timestamp"] = "—"
+        details["job_name"] = os.environ["GITHUB_JOB"]
+        return False, details
 
     job_name = os.environ["GITHUB_JOB"]
     ts = get_job_timestamp_in_run(last_run_id, job_name)
     if not ts:
-        logging.info(
-            "Result (job scope): ran_recently=false (prior run lacks matching job)."
-        )
-        return False
+        details["reason"] = "Prior run did not include a matching job."
+        details["age_seconds"] = "—"
+        details["prior_run_id"] = last_run_id
+        details["prior_timestamp"] = "—"
+        details["job_name"] = job_name
+        return False, details
 
     age = calculate_age_seconds(ts)
     recent = age < window_seconds
-    logging.info(
-        f"Result (job scope): ran_recently={'true' if recent else 'false'} "
-        f"(age={age:.0f}s, window={window_seconds}s, ts={ts}, job='{job_name}', prior_run_id={last_run_id})."
+    details["reason"] = (
+        "Recent prior job run detected."
+        if recent
+        else "Prior job run is outside the window."
     )
-    return recent
+    details["age_seconds"] = f"{int(age)}"
+    details["prior_run_id"] = last_run_id
+    details["prior_timestamp"] = ts
+    details["job_name"] = job_name
+    return recent, details
+
+
+# ─────────────────────────── Summary ───────────────────────────
+
+
+def log_summary(
+    scope: str, result: bool, details: Dict[str, str], window_seconds: int
+) -> None:
+    """Emit a compact, human-friendly summary of the decision."""
+    branch = os.environ["GITHUB_REF_NAME"]
+    default_branch = os.environ["GITHUB_DEFAULT_BRANCH"]
+    always_false_default = (
+        os.environ["ALWAYS_FALSE_ON_DEFAULT_BRANCH"].lower() == "true"
+    )
+
+    # Prepare fields
+    age_raw = details.get("age_seconds")
+    age_h = humanize_seconds(float(age_raw) if age_raw and age_raw.isdigit() else None)
+
+    # Grouped, readable breakdown
+    _begin_group("Recent Run Check Summary")
+    logging.info(f"Decision: ran_recently={'true' if result else 'false'}")
+    logging.info("Context:")
+    logging.info(f"  • Scope: {scope}")
+    logging.info(f"  • Branch: {branch}")
+    logging.info(f"  • Default branch: {default_branch}")
+    logging.info(f"  • Always false on default: {always_false_default}")
+    logging.info("Evaluation:")
+    logging.info(f"  • Reason: {details.get('reason', '—')}")
+    logging.info(f"  • Window: {window_seconds}s")
+    logging.info(f"  • Age: {age_h} ({age_raw or '—'}s)")
+    logging.info(f"  • Prior run id: {details.get('prior_run_id', '—')}")
+    logging.info(f"  • Prior timestamp: {details.get('prior_timestamp', '—')}")
+    if scope == "job":
+        logging.info(
+            f"  • Job name: {details.get('job_name', os.environ['GITHUB_JOB'])}"
+        )
+    _end_group()
 
 
 # ─────────────────────────── Main ───────────────────────────
@@ -207,28 +283,38 @@ def main() -> bool:
         os.environ["ALWAYS_FALSE_ON_DEFAULT_BRANCH"].lower() == "true"
     )
 
-    logging.info(
-        f"Start recent-run check (scope={scope}, window={window}s, branch='{branch}', "
-        f"default_branch='{default_branch}', always_false_on_default={always_false_default})."
+    logging.debug(
+        f"SCOPE={scope}, WINDOW_SECONDS={window}, branch={branch}, default={default_branch}, "
+        f"always_false_on_default={always_false_default}"
     )
 
     if always_false_default and branch == default_branch:
-        logging.info("Default-branch protection active; forcing ran_recently=false.")
+        details = {
+            "reason": "Default-branch protection active.",
+            "age_seconds": "—",
+            "prior_run_id": "—",
+            "prior_timestamp": "—",
+        }
+        log_summary(scope, False, details, window)
         return False
 
     if scope == "workflow":
-        return workflow_ran_recently(window)
+        result, details = workflow_decision(window)
     elif scope == "job":
-        return job_ran_recently(window)
+        result, details = job_decision(window)
     else:
         logging.error(f"Unrecognized SCOPE value: {os.environ['SCOPE']}")
         raise ValueError(f"Unrecognized SCOPE: {os.environ['SCOPE']}")
+
+    log_summary(scope, result, details, window)
+    return result
 
 
 if __name__ == "__main__":
     try:
         print(f"ran_recently={'true' if main() else 'false'}")
     except Exception as e:
+        # Ensure a clear end-user message while still surfacing failure.
         logging.error(f"Unhandled error: {e}")
         print("ran_recently=false")
         raise
