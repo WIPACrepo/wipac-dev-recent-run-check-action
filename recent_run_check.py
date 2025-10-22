@@ -111,7 +111,7 @@ def get_latest_prior_different_commit_run() -> dict | None:
 
 
 def workflow_decision(window_seconds: int) -> tuple[bool, dict[str, str]]:
-    """Return (result, details) for workflow scope decision."""
+    """Return (recent, details) for workflow scope decision."""
     details: dict[str, str] = {}
     prior = get_latest_prior_different_commit_run()
     if not prior:
@@ -170,7 +170,7 @@ def get_job_timestamp_in_run(run_id: str, job_name: str) -> str | None:
 
 
 def job_decision(window_seconds: int) -> tuple[bool, dict[str, str]]:
-    """Return (result, details) for job scope decision."""
+    """Return (recent, details) for job scope decision."""
     details: dict[str, str] = {}
     last_run_id = get_latest_prior_different_commit_run_id()
     if not last_run_id:
@@ -216,7 +216,7 @@ def job_decision(window_seconds: int) -> tuple[bool, dict[str, str]]:
 
 
 def summary_lines(
-    scope: str, result: bool, details: dict[str, str], window_seconds: int
+    scope: str, recent: bool, details: dict[str, str], window_seconds: int
 ) -> list[str]:
     """Return compact human-readable summary lines with a single decision emoji."""
     branch = os.environ["GITHUB_REF_NAME"]
@@ -227,10 +227,10 @@ def summary_lines(
 
     age_raw = details.get("age_seconds")
     age_h = humanize_seconds(float(age_raw) if age_raw and age_raw.isdigit() else None)
-    emoji = "⚡🕒" if result else "🐢🕒"  # recent vs not recent
+    emoji = "⚡🕒" if recent else "🐢🕒"  # recent vs not recent
 
     lines = [
-        f"{emoji} ran_recently: {'true' if result else 'false'}",
+        f"{emoji} ran_recently: {'true' if recent else 'false'}",
         f"reason: {details.get('reason', '—')}",
         f"context: scope={scope}, branch={branch}, window={window_seconds}s, age={age_h} ({age_raw or '—'}s)",
         f"prior: run_id={details.get('prior_run_id', '—')}, timestamp={details.get('prior_timestamp', '—')}",
@@ -246,7 +246,7 @@ def summary_lines(
 
 
 def compute_decision() -> tuple[bool, dict[str, str], int, str]:
-    """Compute and return (result, details, window_seconds, scope)."""
+    """Compute and return (recent, details, window_seconds, scope)."""
     _setup_logging()
 
     window = int(os.environ["WINDOW_SECONDS"])
@@ -272,27 +272,27 @@ def compute_decision() -> tuple[bool, dict[str, str], int, str]:
         return False, details, window, scope
 
     if scope == "workflow":
-        result, details = workflow_decision(window)
+        recent, details = workflow_decision(window)
     elif scope == "job":
-        result, details = job_decision(window)
+        recent, details = job_decision(window)
     else:
         logging.error(f"unrecognized SCOPE: {os.environ['SCOPE']}")
         raise ValueError(f"Unrecognized SCOPE: {os.environ['SCOPE']}")
 
-    return result, details, window, scope
+    return recent, details, window, scope
 
 
 def main() -> bool:
     """Execute the decision, print summary, and return bool."""
     try:
-        result, details, window, scope = compute_decision()
-        for line in summary_lines(scope, result, details, window):
+        recent, details, window, scope = compute_decision()
+        for line in summary_lines(scope, recent, details, window):
             print(line)
     except Exception as e:
         logging.exception(f"unhandled error: {e}")
         raise
 
-    return result
+    return recent
 
 
 if __name__ == "__main__":
