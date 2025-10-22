@@ -227,7 +227,7 @@ def summary_lines(
 
     age_raw = details.get("age_seconds")
     age_h = humanize_seconds(float(age_raw) if age_raw and age_raw.isdigit() else None)
-    emoji = "⏳" if result else "✅"  # recent vs not recent
+    emoji = "⚡🕒" if result else "🐢🕒"  # recent vs not recent
 
     lines = [
         f"{emoji} ran_recently: {'true' if result else 'false'}",
