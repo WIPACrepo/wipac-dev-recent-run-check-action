@@ -1,0 +1,44 @@
+name: Recent run check
+description: Outputs a boolean if this workflow or job ran recently on this branch.
+
+inputs:
+  scope:
+    description: "'job' or 'workflow' — whether to detect recent runs at job level or workflow level"
+    required: false
+    default: "job"
+  window-seconds:
+    description: "Number of seconds that counts as 'recent'"
+    required: false
+    default: "600"
+  always-false-on-default-branch:
+    description: "If true, always output false when running on the repo's default branch"
+    required: false
+    default: "true"
+
+outputs:
+  ran_recently:
+    description: "true or false"
+    value: ${{ steps.recent.outputs.ran_recently }}
+
+runs:
+  using: composite
+  steps:
+    - uses: actions/setup-python@v5
+      with:
+        python-version: '3.x'
+
+    - id: recent
+      shell: bash
+      env:
+        SCOPE: ${{ inputs.scope }}
+        WINDOW_SECONDS: ${{ inputs.window-seconds }}
+        ALWAYS_FALSE_ON_DEFAULT_BRANCH: ${{ inputs.always-false-on-default-branch }}
+        GITHUB_TOKEN: ${{ github.token }}
+        GITHUB_REF_NAME: ${{ github.ref_name }}
+        GITHUB_REPOSITORY: ${{ github.repository }}
+        GITHUB_WORKFLOW_REF: ${{ github.workflow_ref }}
+        GITHUB_RUN_ID: ${{ github.run_id }}
+        GITHUB_DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        GITHUB_JOB: ${{ github.job }}
+        GITHUB_SHA: ${{ github.sha }}
+      run: python "${GITHUB_ACTION_PATH}/recent_run_check.py"
