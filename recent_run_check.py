@@ -312,9 +312,20 @@ def main() -> bool:
 
 if __name__ == "__main__":
     try:
-        print(f"ran_recently={'true' if main() else 'false'}")
+        result = main()
+        # Write ONLY the output to GITHUB_OUTPUT properly
+        output_path = os.environ.get("GITHUB_OUTPUT")
+        if output_path:
+            with open(output_path, "a") as f:
+                f.write(f"ran_recently={'true' if result else 'false'}\n")
+        # Also echo for logs
+        print(f"ran_recently={'true' if result else 'false'}")
     except Exception as e:
-        # Ensure a clear end-user message while still surfacing failure.
         logging.error(f"Unhandled error: {e}")
+        # Still write a valid output
+        output_path = os.environ.get("GITHUB_OUTPUT")
+        if output_path:
+            with open(output_path, "a") as f:
+                f.write("ran_recently=false\n")
         print("ran_recently=false")
         raise

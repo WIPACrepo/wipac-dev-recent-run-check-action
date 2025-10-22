@@ -41,6 +41,4 @@ runs:
         GITHUB_DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
         GITHUB_JOB: ${{ github.job }}
         GITHUB_SHA: ${{ github.sha }}
-      run: |
-        set -euo pipefail; echo "now: $(date -u +"%Y-%m-%dT%H:%M:%S.%3N")"
-        python "${GITHUB_ACTION_PATH}/recent_run_check.py" >> "$GITHUB_OUTPUT"
+      run: python "${GITHUB_ACTION_PATH}/recent_run_check.py"
