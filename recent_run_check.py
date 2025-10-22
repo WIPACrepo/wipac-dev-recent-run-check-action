@@ -17,9 +17,14 @@ from datetime import datetime, timezone
 
 
 def _setup_logging() -> None:
-    """Configure logging based on DEBUG environment variable."""
-    logging.basicConfig(level="DEBUG", format="[%(levelname)s] %(message)s")
-    logging.debug("Debug logging is enabled.")
+    """Configure logging with level set by LOG_LEVEL (DEBUG/INFO/WARNING/ERROR)."""
+    level_name = os.environ.get("LOG_LEVEL", "INFO").upper()
+    level = getattr(logging, level_name, logging.INFO)
+    logging.basicConfig(
+        level=level,
+        format="[%({levelname})s] %(message)s".format(levelname="levelname"),
+    )
+    logging.debug(f"Logging initialized at level={level_name}")
 
 
 # ────────────────────────── Utilities ──────────────────────────
@@ -27,7 +32,7 @@ def _setup_logging() -> None:
 
 def gh_api(url: str) -> dict:
     """Call the GitHub API and return parsed JSON."""
-    logging.debug(f"Requesting URL: {url}")
+    logging.debug(f"HTTP GET {url}")
     req = urllib.request.Request(
         url,
         headers={
@@ -37,8 +42,12 @@ def gh_api(url: str) -> dict:
         },
     )
     with urllib.request.urlopen(req) as resp:
+        status = resp.getcode()
+        rl_rem = resp.headers.get("x-ratelimit-remaining")
         data = json.loads(resp.read().decode("utf-8"))
-        logging.debug(f"GitHub API response keys: {list(data.keys())}")
+        logging.debug(
+            f"HTTP {status}; rate_limit_remaining={rl_rem}; keys={list(data.keys())}"
+        )
         return data
 
 
@@ -50,7 +59,7 @@ def parse_utc(ts: str) -> datetime:
 def calculate_age_seconds(ts: str) -> float:
     """Return how many seconds have elapsed since the given timestamp."""
     age = (datetime.now(timezone.utc) - parse_utc(ts)).total_seconds()
-    logging.debug(f"Timestamp {ts} is {age:.2f}s old")
+    logging.debug(f"Age since {ts} is {age:.2f}s")
     return age
 
 
@@ -58,14 +67,14 @@ def get_workflow_file() -> str:
     """Extract the workflow filename from GITHUB_WORKFLOW_REF."""
     ref = os.environ["GITHUB_WORKFLOW_REF"]
     wf_file = ref.split(".github/workflows/")[1].split("@")[0]
-    logging.debug(f"Detected workflow file: {wf_file}")
+    logging.debug(f"Workflow file detected: {wf_file}")
     return wf_file
 
 
 def get_owner_repo() -> tuple[str, str]:
     """Return (owner, repo) parsed from GITHUB_REPOSITORY."""
     owner, repo = tuple(os.environ["GITHUB_REPOSITORY"].split("/", 1))
-    logging.debug(f"Repository owner={owner}, repo={repo}")
+    logging.debug(f"Repo parsed as owner={owner}, repo={repo}")
     return owner, repo
 
 
@@ -88,14 +97,15 @@ def get_latest_prior_different_commit_run() -> dict | None:
         rid = str(run["id"])
         sha = run.get("head_sha")
         if rid == current_run:
-            logging.debug(f"Skipping run {rid} (current run id)")
+            logging.debug(f"Skip run_id={rid} (current run).")
             continue
         if sha == current_sha:
-            logging.debug(f"Skipping run {rid} (same commit SHA: {sha})")
+            logging.debug(f"Skip run_id={rid} (same commit sha={sha}).")
             continue
-        logging.debug(f"Found prior different-commit run: {rid} (SHA={sha})")
+        logging.info(f"Prior different-commit run found: run_id={rid}, sha={sha}.")
         return run
-    logging.debug("No prior different-commit run found.")
+
+    logging.info("No prior different-commit workflow run found on this branch.")
     return None
 
 
@@ -103,12 +113,24 @@ def workflow_ran_recently(window_seconds: int) -> bool:
     """Return True if a different-commit workflow run occurred on this branch within the time window."""
     prior = get_latest_prior_different_commit_run()
     if not prior:
+        logging.info(
+            "Result (workflow scope): ran_recently=false (no prior different-commit run)."
+        )
         return False
+
     ts = prior.get("run_started_at") or prior.get("created_at")
     if not ts:
+        logging.warning(
+            "Prior run exists but has no timestamp; treating as not recent."
+        )
         return False
-    recent = calculate_age_seconds(ts) < window_seconds
-    logging.debug(f"Workflow-level recent? {recent}")
+
+    age = calculate_age_seconds(ts)
+    recent = age < window_seconds
+    logging.info(
+        f"Result (workflow scope): ran_recently={'true' if recent else 'false'} "
+        f"(age={age:.0f}s, window={window_seconds}s, ts={ts})."
+    )
     return recent
 
 
@@ -128,12 +150,19 @@ def get_job_timestamp_in_run(run_id: str, job_name: str) -> str | None:
         f"https://api.github.com/repos/{owner}/{repo}/actions/runs/{run_id}/jobs"
         f"?per_page=100"
     )
-    for job in gh_api(url).get("jobs", []):
+    jobs = gh_api(url).get("jobs", [])
+    for job in jobs:
         if job.get("name") == job_name:
             ts = job.get("started_at") or job.get("created_at")
-            logging.debug(f"Job {job_name} in run {run_id} timestamp={ts}")
+            logging.info(
+                f"Matched job name='{job_name}' in prior run_id={run_id}; ts={ts}."
+            )
             return ts
-    logging.debug(f"Job {job_name} not found in run {run_id}.")
+
+    # If the job has a custom `name:` in YAML and differs from github.job, this may miss; that's intentional for auto-detect.
+    logging.warning(
+        f"Job name='{job_name}' not found in prior run_id={run_id}; treating as not recent."
+    )
     return None
 
 
@@ -141,13 +170,25 @@ def job_ran_recently(window_seconds: int) -> bool:
     """Return True if this same job ran in a different-commit workflow run within the time window."""
     last_run_id = get_latest_prior_different_commit_run_id()
     if not last_run_id:
+        logging.info(
+            "Result (job scope): ran_recently=false (no prior different-commit run)."
+        )
         return False
+
     job_name = os.environ["GITHUB_JOB"]
     ts = get_job_timestamp_in_run(last_run_id, job_name)
     if not ts:
+        logging.info(
+            "Result (job scope): ran_recently=false (prior run lacks matching job)."
+        )
         return False
-    recent = calculate_age_seconds(ts) < window_seconds
-    logging.debug(f"Job-level recent? {recent}")
+
+    age = calculate_age_seconds(ts)
+    recent = age < window_seconds
+    logging.info(
+        f"Result (job scope): ran_recently={'true' if recent else 'false'} "
+        f"(age={age:.0f}s, window={window_seconds}s, ts={ts}, job='{job_name}', prior_run_id={last_run_id})."
+    )
     return recent
 
 
@@ -162,18 +203,17 @@ def main() -> bool:
     scope = os.environ["SCOPE"].lower()
     branch = os.environ["GITHUB_REF_NAME"]
     default_branch = os.environ["GITHUB_DEFAULT_BRANCH"]
-
-    logging.debug(
-        f"SCOPE={scope}, WINDOW_SECONDS={window}, branch={branch}, default={default_branch}"
+    always_false_default = (
+        os.environ["ALWAYS_FALSE_ON_DEFAULT_BRANCH"].lower() == "true"
     )
 
-    if (
-        os.environ["ALWAYS_FALSE_ON_DEFAULT_BRANCH"].lower() == "true"
-        and branch == default_branch
-    ):
-        logging.debug(
-            "On default branch with ALWAYS_FALSE_ON_DEFAULT_BRANCH=true → returning False"
-        )
+    logging.info(
+        f"Start recent-run check (scope={scope}, window={window}s, branch='{branch}', "
+        f"default_branch='{default_branch}', always_false_on_default={always_false_default})."
+    )
+
+    if always_false_default and branch == default_branch:
+        logging.info("Default-branch protection active; forcing ran_recently=false.")
         return False
 
     if scope == "workflow":
@@ -181,8 +221,14 @@ def main() -> bool:
     elif scope == "job":
         return job_ran_recently(window)
     else:
+        logging.error(f"Unrecognized SCOPE value: {os.environ['SCOPE']}")
         raise ValueError(f"Unrecognized SCOPE: {os.environ['SCOPE']}")
 
 
 if __name__ == "__main__":
-    print(f"ran_recently={'true' if main() else 'false'}")
+    try:
+        print(f"ran_recently={'true' if main() else 'false'}")
+    except Exception as e:
+        logging.error(f"Unhandled error: {e}")
+        print("ran_recently=false")
+        raise
